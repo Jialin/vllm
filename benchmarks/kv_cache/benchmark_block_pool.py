@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 import time
+from collections import defaultdict
+from random import randint
 from typing import Optional
 
 from tabulate import tabulate
 
 from vllm.utils import FlexibleArgumentParser
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.kv_cache_utils import BlockHash, BlockHashWithGroupId
 
 
 class Metric:
@@ -29,39 +31,93 @@ class Metric:
 
 
 def main(args):
+    MAX_SIZE_LOG10 = 6
+    MAX_SIZE = 10**MAX_SIZE_LOG10
+    hashes = [
+        BlockHashWithGroupId(
+            block_hash=BlockHash(
+                hash_value=randint(-(2**31), 2**31),
+                token_ids=tuple(randint(0, 128000) for _ in range(16)),
+            ),
+            group_id=0,
+        )
+        for i in range(MAX_SIZE)
+    ]
+    unknown_hashes = [
+        BlockHashWithGroupId(
+            block_hash=BlockHash(
+                hash_value=randint(-(2**31), 2**31),
+                token_ids=tuple(randint(0, 128000) for _ in range(16)),
+            ),
+            group_id=0,
+        )
+        for i in range(MAX_SIZE)
+    ]
+
     rows = []
-    for allocate_block in args.allocate_blocks:
-        # Enforce a GC collect ahead to minimize the impact among runs
+    for size_log10 in range(MAX_SIZE_LOG10 + 1):
+        size = 10**size_log10
+        cache: defaultdict[BlockHashWithGroupId, dict[int, int]] = defaultdict(dict)
+
         gc.collect()
-        block_pool = BlockPool(num_gpu_blocks=args.num_gpu_blocks, enable_caching=True)
-
-        get_blocks_metric: Metric = Metric()
-        free_blocks_metric: Metric = Metric()
-        for _ in range(args.num_iteration):
+        insert_key_metric: Metric = Metric()
+        for i in range(size):
             t1 = time.monotonic_ns()
-            blocks = block_pool.get_new_blocks(allocate_block)
+            cache[hashes[i]] = {i: i}
             t2 = time.monotonic_ns()
-            block_pool.free_blocks(blocks)
-            t3 = time.monotonic_ns()
-            get_blocks_metric.update(t2 - t1)
-            free_blocks_metric.update(t3 - t2)
+            insert_key_metric.update(t2 - t1)
 
-        if get_blocks_metric.max_v is not None and free_blocks_metric.max_v is not None:
+        gc.collect()
+        del_key_metric: Metric = Metric()
+        for i in range(size):
+            t1 = time.monotonic_ns()
+            cache.pop(hashes[i], None)
+            t2 = time.monotonic_ns()
+            del_key_metric.update(t2 - t1)
+
+        gc.collect()
+        insert_after_del_key_metric: Metric = Metric()
+        for i in range(size):
+            t1 = time.monotonic_ns()
+            cache[hashes[i]] = {i: i}
+            t2 = time.monotonic_ns()
+            insert_after_del_key_metric.update(t2 - t1)
+
+        gc.collect()
+        known_key_metric: Metric = Metric()
+        unknown_key_metric: Metric = Metric()
+        for i in range(args.num_iteration):
+            idx = i % size
+            t1 = time.monotonic_ns()
+            cache.get(hashes[idx])
+            t2 = time.monotonic_ns()
+            cache.get(unknown_hashes[idx])
+            t3 = time.monotonic_ns()
+            known_key_metric.update(t2 - t1)
+            unknown_key_metric.update(t3 - t2)
+
+        if (
+            insert_key_metric.max_v is not None
+            and del_key_metric.max_v is not None
+            and insert_after_del_key_metric.max_v is not None
+            and known_key_metric.max_v is not None
+            and unknown_key_metric.max_v is not None
+        ):
             rows.append(
                 [
-                    get_blocks_metric.cnt,
-                    args.num_gpu_blocks,
-                    allocate_block,
-                    get_blocks_metric.avg_v() / 1000000,
-                    get_blocks_metric.max_v / 1000000.0,
-                    free_blocks_metric.avg_v() / 1000000,
-                    free_blocks_metric.max_v / 1000000.0,
+                    known_key_metric.cnt,
+                    size,
+                    insert_key_metric.avg_v() / 1000.0,
+                    insert_key_metric.max_v / 1000.0,
+                    del_key_metric.avg_v() / 1000.0,
+                    del_key_metric.max_v / 1000.0,
+                    insert_after_del_key_metric.avg_v() / 1000.0,
+                    insert_after_del_key_metric.max_v / 1000.0,
+                    known_key_metric.avg_v() / 1000.0,
+                    known_key_metric.max_v / 1000.0,
+                    unknown_key_metric.avg_v() / 1000.0,
+                    unknown_key_metric.max_v / 1000.0,
                 ]
-            )
-        else:
-            print(
-                "No valid metrics found."
-                f" {get_blocks_metric.max_v=} {free_blocks_metric.max_v=}"
             )
 
     print(
@@ -69,12 +125,17 @@ def main(args):
             rows,
             headers=[
                 "Iterations",
-                "Total\nBlocks",
-                "Allocated\nBlocks",
-                "Get Blocks\nAvg (ms)",
-                "Get Blocks\nMax (ms)",
-                "Free Blocks\nAvg (ms)",
-                "Free Blocks\nMax (ms)",
+                "N",
+                "Insert\nAvg (us)",
+                "Insert\nMax (us)",
+                "Del\nAvg (us)",
+                "Del\nMax (us)",
+                "Insert after Del\nAvg (us)",
+                "Insert after Del\nMax (us)",
+                "Known Lookup\nAvg (us)",
+                "Known Lookup\nMax (us)",
+                "Unknown Lookup\nAvg (us)",
+                "Unknown Lookup\nMax (us)",
             ],
             tablefmt="grid",
             floatfmt=".6f",
@@ -90,7 +151,7 @@ def invoke_main() -> None:
     parser.add_argument(
         "--num-iteration",
         type=int,
-        default=1000,
+        default=10000,
         help="Number of iterations to run to stablize final data readings",
     )
     parser.add_argument(
