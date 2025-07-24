@@ -177,7 +177,10 @@ class Scheduler(SchedulerInterface):
 
         total = time.monotonic_ns()
         get_computed_blocks_ns = 0
-        allocate_slots_ns = 0
+        allocate_cache_ns = 0
+        allocate_save_ns = 0
+        allocate_new_ns = 0
+        allocate_other_ns = 0
 
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
@@ -250,12 +253,14 @@ class Scheduler(SchedulerInterface):
                 continue
 
             while True:
-                t = time.monotonic_ns()
-                new_blocks = self.kv_cache_manager.allocate_slots(
+                new_blocks, sub_allocate_all_ns, sub_allocate_cache_ns, sub_allocate_save_ns, sub_allocate_new_ns = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
-                allocate_slots_ns += time.monotonic_ns() - t
+                allocate_cache_ns += sub_allocate_cache_ns
+                allocate_save_ns += sub_allocate_save_ns
+                allocate_new_ns += sub_allocate_new_ns
+                allocate_other_ns += sub_allocate_all_ns - sub_allocate_cache_ns - sub_allocate_save_ns - sub_allocate_new_ns
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -447,8 +452,7 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
-                t = time.monotonic_ns()
-                new_blocks = self.kv_cache_manager.allocate_slots(
+                new_blocks, sub_allocate_all_ns, sub_allocate_cache_ns, sub_allocate_save_ns, sub_allocate_new_ns = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
                     num_new_local_computed_tokens,
@@ -456,7 +460,10 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
                 )
-                allocate_slots_ns += time.monotonic_ns() - t
+                allocate_cache_ns += sub_allocate_cache_ns
+                allocate_save_ns += sub_allocate_save_ns
+                allocate_new_ns += sub_allocate_new_ns
+                allocate_other_ns += sub_allocate_all_ns - sub_allocate_cache_ns - sub_allocate_save_ns - sub_allocate_new_ns
 
                 if new_blocks is None:
                     # The request cannot be scheduled.
@@ -597,14 +604,25 @@ class Scheduler(SchedulerInterface):
 
         total = time.monotonic_ns() - total
         logger.info("===LITE " + json.dumps({
-            "SCHEDULE:ALLOCATE": {
-                "ns": allocate_slots_ns
+            "SCHEDULE:ALLOCATE_CACHE": {
+                "ns": allocate_cache_ns
+            },
+            "SCHEDULE:ALLOCATE_SAVE": {
+                "ns": allocate_save_ns
+            },
+            "SCHEDULE:ALLOCATE_NEW": {
+                "ns": allocate_new_ns
+            },
+            "SCHEDULE:ALLOCATE_OTHER": {
+                "ns": allocate_other_ns
             },
             "SCHEDULE:GET_COMPUTED": {
                 "ns": get_computed_blocks_ns
             },
             "SCHEDULE:OTHERS": {
-                "ns": total - allocate_slots_ns - get_computed_blocks_ns
+                "ns":
+                total - allocate_cache_ns - allocate_save_ns -
+                allocate_new_ns - allocate_other_ns - get_computed_blocks_ns
             },
         }))
         return scheduler_output
