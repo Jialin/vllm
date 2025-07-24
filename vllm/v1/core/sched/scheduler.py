@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -174,6 +175,10 @@ class Scheduler(SchedulerInterface):
         # chunked prefills, prefix caching, speculative decoding,
         # and the "jump decoding" optimization in the future.
 
+        total = time.monotonic_ns()
+        get_computed_blocks_ns = 0
+        allocate_slots_ns = 0
+
         scheduled_new_reqs: list[Request] = []
         scheduled_resumed_reqs: list[Request] = []
         scheduled_running_reqs: list[Request] = []
@@ -245,10 +250,13 @@ class Scheduler(SchedulerInterface):
                 continue
 
             while True:
+                t = time.monotonic_ns()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens,
                     num_lookahead_tokens=self.num_lookahead_tokens)
+                allocate_slots_ns += time.monotonic_ns() - t
+
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     # Preempt the lowest-priority request.
@@ -376,9 +384,11 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
+                    t = time.monotonic_ns()
                     new_computed_blocks, num_new_local_computed_tokens = \
                         self.kv_cache_manager.get_computed_blocks(
                             request)
+                    get_computed_blocks_ns += time.monotonic_ns() - t
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:
@@ -437,6 +447,7 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
+                t = time.monotonic_ns()
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
                     num_new_tokens + num_external_computed_tokens,
@@ -445,6 +456,8 @@ class Scheduler(SchedulerInterface):
                     num_lookahead_tokens=self.num_lookahead_tokens,
                     delay_cache_blocks=load_kv_async,
                 )
+                allocate_slots_ns += time.monotonic_ns() - t
+
                 if new_blocks is None:
                     # The request cannot be scheduled.
                     break
@@ -581,6 +594,19 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.publish(batch)
 
         self._update_after_schedule(scheduler_output)
+
+        total = time.monotonic_ns() - total
+        logger.info("===LITE " + json.dumps({
+            "SCHEDULE:ALLOCATE": {
+                "ns": allocate_slots_ns
+            },
+            "SCHEDULE:GET_COMPUTED": {
+                "ns": get_computed_blocks_ns
+            },
+            "SCHEDULE:OTHERS": {
+                "ns": total - allocate_slots_ns - get_computed_blocks_ns
+            },
+        }))
         return scheduler_output
 
     def _update_after_schedule(

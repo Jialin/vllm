@@ -261,16 +261,16 @@ class EngineCore:
 
         total = time.monotonic_ns() - total
         logger.info("===LITE " + json.dumps({
-            "STEP>SCHEDULE": {
+            "STEP:SCHEDULE": {
                 "ns": schedule_ts
             },
-            "STEP>MODEL": {
+            "STEP:MODEL": {
                 "ns": model_ts
             },
-            "STEP>OUTPUT": {
+            "STEP:OUTPUT": {
                 "ns": output_ts
             },
-            "STEP>OTHERS": {
+            "STEP:OTHERS": {
                 "ns": total - schedule_ts - model_ts - output_ts
             }
         }))
@@ -676,11 +676,11 @@ class EngineCoreProc(EngineCore):
         total = time.monotonic_ns() - total
         if req_cnt:
             logger.info("===LITE " + json.dumps({
-                "INPUT>PROCESS": {
+                "INPUT:PROCESS": {
                     "ns": total - pure_wait,
                     "cnt": req_cnt
                 },
-                "INPUT>WAIT": {
+                "INPUT:WAIT": {
                     "ns": pure_wait
                 }
             }))
