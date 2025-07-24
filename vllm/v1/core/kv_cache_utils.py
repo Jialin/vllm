@@ -146,6 +146,8 @@ class KVCacheBlock:
     # It is only available when the block is full.
     _block_hash: Optional[BlockHashWithGroupId] = None
 
+    trie_node: Optional["KVCacheTrieNode"] = None
+
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
     prev_free_block: Optional["KVCacheBlock"] = None
@@ -1141,3 +1143,145 @@ def unify_kv_cache_configs(kv_cache_configs: list[KVCacheConfig]):
         kv_cache_config.num_blocks = min_num_blocks
 
     return kv_cache_configs
+
+
+class KVCacheTrieNodeChildren:
+
+    def __init__(self):
+        self.single_block_hash: Optional[BlockHash] = None
+        self.single_child: Optional[KVCacheTrieNode] = None
+        self.children: Optional[dict[BlockHash, KVCacheTrieNode]] = None
+
+    def get(self, block_hash: BlockHash) -> Optional["KVCacheTrieNode"]:
+        if self.children is not None:
+            return self.children.get(block_hash)
+        return self.single_child if self.single_block_hash == block_hash else None
+
+    def put(self, block_hash: BlockHash, child: "KVCacheTrieNode") -> None:
+        if self.children is not None:
+            self.children[block_hash] = child
+            return
+        if self.single_block_hash is not None and self.single_child is not None:
+            self.children = {
+                self.single_block_hash: self.single_child,
+                block_hash: child
+            }
+        else:
+            self.single_block_hash = block_hash
+            self.single_child = child
+
+    def pop(self, block_hash: BlockHash) -> None:
+        if self.children is not None:
+            self.children.pop(block_hash)
+            return
+        if self.single_block_hash == block_hash:
+            self.single_block_hash = None
+            self.single_child = None
+
+    # TODO(jialino): debug only
+    def len(self) -> int:
+        if self.children is not None:
+            return len(self.children)
+        return 0 if self.single_block_hash is None else 1
+
+    def empty(self) -> bool:
+        return len(
+            self.children
+        ) == 0 if self.children is not None else self.single_block_hash is None
+
+
+class KVCacheTrieNodeBlocks:
+
+    def __init__(self) -> None:
+        self.single_group_id: Optional[int] = None
+        self.single_block_id: Optional[int] = None
+        self.single_block: Optional[KVCacheBlock] = None
+        self.blocks: Optional[defaultdict[int, dict[int, KVCacheBlock]]] = None
+
+    def put(self, group_id: int, block_id: int, block: KVCacheBlock) -> None:
+        if self.blocks is not None:
+            self.blocks[group_id][block_id] = block
+            return
+        if self.single_group_id is not None and self.single_block_id is not None and self.single_block is not None:
+            self.blocks = defaultdict(dict)
+            self.blocks[self.single_group_id][
+                self.single_block_id] = self.single_block
+            self.blocks[group_id][block_id] = block
+        else:
+            self.single_group_id = group_id
+            self.single_block_id = block_id
+            self.single_block = block
+
+    def pop(self, group_id: int, block_id: int) -> Optional[KVCacheBlock]:
+        if self.blocks is not None:
+            blocks_by_group_id = self.blocks.get(group_id)
+            if blocks_by_group_id is None:
+                return None
+            return blocks_by_group_id.pop(block_id, None)
+        block: Optional[KVCacheBlock] = None
+        if self.single_group_id == group_id and self.single_block_id == block_id:
+            block = self.single_block
+            self.single_group_id = None
+            self.single_block_id = None
+            self.single_block = None
+        return block
+
+    def get_one_block(self, group_id: int) -> Optional[KVCacheBlock]:
+        if self.blocks is not None:
+            blocks_by_group_id = self.blocks.get(group_id)
+            if blocks_by_group_id is None:
+                return None
+            return next(iter(blocks_by_group_id.values()))
+        return self.single_block if self.single_group_id == group_id else None
+
+    def empty(self) -> bool:
+        return len(
+            self.blocks
+        ) == 0 if self.blocks is not None else self.single_group_id is None
+
+
+class KVCacheTrieNode:
+
+    def __init__(self,
+                 parent: Optional["KVCacheTrieNode"] = None,
+                 parent_hash: Optional[BlockHash] = None) -> None:
+        self.children: KVCacheTrieNodeChildren = KVCacheTrieNodeChildren()
+        self.parent: Optional[KVCacheTrieNode] = parent
+        self.parent_hash: Optional[BlockHash] = parent_hash
+        self.blocks: KVCacheTrieNodeBlocks = KVCacheTrieNodeBlocks()
+
+    def access(self, block_hash: BlockHash) -> Optional["KVCacheTrieNode"]:
+        return self.children.get(block_hash)
+
+    def force_access(self, block_hash: BlockHash) -> "KVCacheTrieNode":
+        node = self.children.get(block_hash)
+        if node is None:
+            node = KVCacheTrieNode(parent=self, parent_hash=block_hash)
+            self.children.put(block_hash, node)
+        return node
+
+    def add_block(self, group_id: int, block_id: int,
+                  block: KVCacheBlock) -> None:
+        self.blocks.put(group_id, block_id, block)
+        assert block.trie_node is None
+        block.trie_node = self
+
+    def pop_block(self, group_id: int, block_id: int) -> bool:
+        block = self.blocks.pop(group_id, block_id)
+        if block is None:
+            return False
+        block.trie_node = None
+        self.maybe_pop_node()
+        return True
+
+    def get_one_block(self, group_id: int) -> Optional[KVCacheBlock]:
+        return self.blocks.get_one_block(group_id)
+
+    def maybe_pop_node(self) -> None:
+        if self.blocks.empty() and self.children.empty(
+        ) and self.parent is not None and self.parent_hash is not None:
+            self.parent.pop_child(self.parent_hash)
+
+    def pop_child(self, block_hash: BlockHash) -> None:
+        self.children.pop(block_hash)
+        self.maybe_pop_node()

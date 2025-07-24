@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections import defaultdict
 from collections.abc import Iterable
 from typing import Callable, Optional
 
@@ -9,6 +8,7 @@ from vllm.distributed.kv_events import (AllBlocksCleared, BlockRemoved,
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import (BlockHash, BlockHashWithGroupId,
                                          FreeKVCacheBlockQueue, KVCacheBlock,
+                                         KVCacheTrieNode,
                                          generate_block_hash_extra_keys,
                                          hash_block_tokens)
 from vllm.v1.request import Request
@@ -57,8 +57,7 @@ class BlockPool:
         # if there is already an identical block in the cache. This is because
         # we want to make sure the allocated block IDs won't change so that
         # block tables are append-only.
-        self.cached_block_hash_to_block: dict[BlockHashWithGroupId, dict[
-            int, KVCacheBlock]] = defaultdict(dict)
+        self.cached_block_trie_root: KVCacheTrieNode = KVCacheTrieNode()
 
         # To represent a placeholder block with block_id=0.
         # The ref_cnt of null_block is not maintained, needs special care to
@@ -70,7 +69,7 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
     def get_cached_block(
-            self, block_hash: BlockHash,
+            self, trie_node: "KVCacheTrieNode",
             kv_cache_group_ids: list[int]) -> Optional[list[KVCacheBlock]]:
         """Get the cached block by the block hash for each group in 
         `kv_cache_group_ids`, or None if cache miss for any group.
@@ -85,12 +84,10 @@ class BlockPool:
         """
         cached_blocks = []
         for group_id in kv_cache_group_ids:
-            cached_blocks_one_group = self.cached_block_hash_to_block.get(
-                BlockHashWithGroupId(block_hash, group_id))
-            if not cached_blocks_one_group:
+            block = trie_node.get_one_block(group_id)
+            if block is None:
                 return None
-            first_block = next(iter(cached_blocks_one_group.values()))
-            cached_blocks.append(first_block)
+            cached_blocks.append(block)
         return cached_blocks
 
     def cache_full_blocks(
@@ -133,10 +130,13 @@ class BlockPool:
         # Update the new blocks with the block hashes through the chain.
         if num_cached_blocks == 0:
             prev_block_hash_value = None
+            parent_trie_node = self.cached_block_trie_root
         else:
             prev_block = blocks[num_cached_blocks - 1]
             assert prev_block.block_hash is not None
             prev_block_hash_value = prev_block.block_hash.get_hash_value()
+            assert prev_block.trie_node is not None
+            parent_trie_node = prev_block.trie_node
 
         parent_block_hash = prev_block_hash_value
         new_hashes: Optional[list[int]] = ([] if self.enable_kv_cache_events
@@ -180,11 +180,14 @@ class BlockPool:
             block_hash_with_group_id = BlockHashWithGroupId(
                 block_hash, kv_cache_group_id)
             blk.block_hash = block_hash_with_group_id
-            self.cached_block_hash_to_block[block_hash_with_group_id][
-                blk.block_id] = blk
+
             if new_hashes is not None:
                 new_hashes.append(block_hash.hash_value)
             prev_block_hash_value = block_hash.hash_value
+
+            child_trie_node = parent_trie_node.force_access(block_hash)
+            child_trie_node.add_block(kv_cache_group_id, blk.block_id, blk)
+            parent_trie_node = child_trie_node
 
         if self.enable_kv_cache_events:
             self.kv_event_queue.append(
@@ -243,15 +246,12 @@ class BlockPool:
         if block_hash is None:
             # The block doesn't have hash, eviction is not needed
             return False
-        blocks_by_id = self.cached_block_hash_to_block.get(block_hash)
-        if blocks_by_id is None:
+        if block.trie_node is not None and not block.trie_node.pop_block(
+                block_hash.group_id, block.block_id):
             # block_hash not found in cached_block_hash_to_block,
             # eviction is not needed
             return False
         block.reset_hash()
-        blocks_by_id.pop(block.block_id, None)
-        if len(blocks_by_id) == 0:
-            del self.cached_block_hash_to_block[block_hash]
 
         if self.enable_kv_cache_events:
             # FIXME (Chen): Not sure whether we should return `hash_value`
@@ -312,7 +312,7 @@ class BlockPool:
             return False
 
         # Remove all hashes so that no new blocks will hit.
-        self.cached_block_hash_to_block = defaultdict(dict)
+        self.cached_block_trie_root = KVCacheTrieNode()
 
         # Remove all hashes from all blocks.
         for block in self.blocks:

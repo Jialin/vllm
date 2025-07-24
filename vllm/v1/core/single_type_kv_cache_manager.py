@@ -257,23 +257,46 @@ class FullAttentionManager(SingleTypeKVCacheManager):
         kv_cache_spec: KVCacheSpec,
         use_eagle: bool,
     ) -> tuple[list[KVCacheBlock], ...]:
+        if len(kv_cache_group_ids) == 0:
+            return tuple()
         assert isinstance(
             kv_cache_spec, (FullAttentionSpec, ChunkedLocalAttentionSpec)
         ), "FullAttentionManager can only be used for full attention " \
             "and chunked local attention groups"
+
         computed_blocks: tuple[list[KVCacheBlock], ...] = tuple(
             [] for _ in range(len(kv_cache_group_ids)))
         max_num_blocks = max_length // kv_cache_spec.block_size
-        for i, block_hash in zip(range(max_num_blocks), block_hashes):
-            # block_hashes is a chain of block hashes. If a block hash is not
-            # in the cached_block_hash_to_id, the following block hashes are
-            # not computed yet for sure.
-            if cached_block := block_pool.get_cached_block(
-                    block_hash, kv_cache_group_ids):
-                for computed, cached in zip(computed_blocks, cached_block):
-                    computed.append(cached)
-            else:
-                break
+        trie_node = block_pool.cached_block_trie_root
+
+        if len(kv_cache_group_ids) == 1:
+            single_computed_blocks = computed_blocks[0]
+            single_group_id = kv_cache_group_ids[0]
+            for block_hash in block_hashes:
+                # block_hashes is a chain of block hashes. If a block hash is not
+                # in the cached_block_hash_to_id, the following block hashes are
+                # not computed yet for sure.
+                trie_node = trie_node.children.get(block_hash)
+                if trie_node is None:
+                    break
+                cached_block = trie_node.blocks.get_one_block(single_group_id)
+                if cached_block is None:
+                    break
+                single_computed_blocks.append(cached_block)
+        else:
+            for i, block_hash in zip(range(max_num_blocks), block_hashes):
+                # block_hashes is a chain of block hashes. If a block hash is not
+                # in the cached_block_hash_to_id, the following block hashes are
+                # not computed yet for sure.
+                trie_node = trie_node.children.get(block_hash)
+                if trie_node is None:
+                    break
+                if cached_block := block_pool.get_cached_block(
+                        trie_node, kv_cache_group_ids):
+                    for computed, cached in zip(computed_blocks, cached_block):
+                        computed.append(cached)
+                else:
+                    break
         if use_eagle and computed_blocks[0]:
             for computed in computed_blocks:
                 computed.pop()
