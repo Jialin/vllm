@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import queue
 import signal
@@ -238,15 +239,41 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+        total = time.monotonic_ns()
 
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
+        schedule_ts = time.monotonic_ns()
         scheduler_output = self.scheduler.schedule()
+        schedule_ts = time.monotonic_ns() - schedule_ts
+
+        model_ts = time.monotonic_ns()
         model_output = self.execute_model(scheduler_output)
+        model_ts = time.monotonic_ns() - model_ts
+
+        output_ts = time.monotonic_ns()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
+        output_ts = time.monotonic_ns() - output_ts
+
+        total = time.monotonic_ns() - total
+        logger.info("===LITE " + json.dumps({
+            "STEP>SCHEDULE": {
+                "ns": schedule_ts
+            },
+            "STEP>MODEL": {
+                "ns": model_ts
+            },
+            "STEP>OUTPUT": {
+                "ns": output_ts
+            },
+            "STEP>OTHERS": {
+                "ns": total - schedule_ts - model_ts - output_ts
+            }
+        }))
 
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
@@ -619,13 +646,20 @@ class EngineCoreProc(EngineCore):
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
+        total = time.monotonic_ns()
+
+        pure_wait = 0
+        req_cnt = 0
 
         waited = False
         while not self.engines_running and not self.scheduler.has_requests():
             if logger.isEnabledFor(DEBUG) and self.input_queue.empty():
                 logger.debug("EngineCore waiting for work.")
                 waited = True
+            before_wait_ts = time.monotonic_ns()
             req = self.input_queue.get()
+            req_cnt += 1
+            pure_wait += time.monotonic_ns() - before_wait_ts
             self._handle_client_request(*req)
 
         if waited:
@@ -633,8 +667,23 @@ class EngineCoreProc(EngineCore):
 
         # Handle any more client requests.
         while not self.input_queue.empty():
+            before_wait_ts = time.monotonic_ns()
             req = self.input_queue.get_nowait()
+            req_cnt += 1
+            pure_wait += time.monotonic_ns() - before_wait_ts
             self._handle_client_request(*req)
+
+        total = time.monotonic_ns() - total
+        if req_cnt:
+            logger.info("===LITE " + json.dumps({
+                "INPUT>PROCESS": {
+                    "ns": total - pure_wait,
+                    "cnt": req_cnt
+                },
+                "INPUT>WAIT": {
+                    "ns": pure_wait
+                }
+            }))
 
     def _process_engine_step(self) -> bool:
         """Called only when there are unfinished local requests."""
