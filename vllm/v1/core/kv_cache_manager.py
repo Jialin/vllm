@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import time
 from collections import defaultdict
 from dataclasses import dataclass
 from typing import Optional
@@ -200,7 +201,7 @@ class KVCacheManager:
         new_computed_blocks: Optional[KVCacheBlocks] = None,
         num_lookahead_tokens: int = 0,
         delay_cache_blocks: bool = False,
-    ) -> Optional[KVCacheBlocks]:
+    ) -> tuple[Optional[KVCacheBlocks], int, int, int, int]:
         """Add slots for a request with new tokens to append.
 
         Args:
@@ -239,6 +240,11 @@ class KVCacheManager:
         if num_new_tokens == 0:
             raise ValueError("num_new_tokens must be greater than 0")
 
+        total = time.monotonic_ns()
+        cache_ns = 0
+        save_ns = 0
+        allocate_new_ns = 0
+
         if new_computed_blocks is not None:
             new_computed_block_list = new_computed_blocks.blocks
         else:
@@ -262,19 +268,24 @@ class KVCacheManager:
             num_computed_tokens + num_new_tokens + num_lookahead_tokens,
             self.max_model_len)
 
+        # get_num_blocks_ns = time.monotonic_ns()
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
             request_id=request.request_id,
             num_tokens=num_tokens_need_slot,
             new_computed_blocks=new_computed_block_list,
         )
+        # get_num_blocks_ns = time.monotonic_ns() - get_num_blocks_ns
 
         if num_blocks_to_allocate > self.block_pool.get_num_free_blocks():
             # Cannot allocate new blocks
-            return None
+            return None, time.monotonic_ns(
+            ) - total, cache_ns, save_ns, allocate_new_ns
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
+            # touch_ns = time.monotonic_ns()
             self.block_pool.touch(new_computed_block_list)
+            # touch_ns = time.monotonic_ns() - touch_ns
         else:
             assert not any(new_computed_block_list), (
                 "Computed blocks should be empty when "
@@ -282,16 +293,21 @@ class KVCacheManager:
 
         # Append the new computed blocks to the request blocks until now to
         # avoid the case where the new blocks cannot be allocated.
+        save_ns = time.monotonic_ns()
         self.coordinator.save_new_computed_blocks(request.request_id,
                                                   new_computed_block_list)
+        save_ns = time.monotonic_ns() - save_ns
 
+        allocate_new_ns = time.monotonic_ns()
         new_blocks = self.coordinator.allocate_new_blocks(
             request.request_id, num_tokens_need_slot)
+        allocate_new_ns = time.monotonic_ns() - allocate_new_ns
 
         # P/D: delay caching blocks if we have to recv from
         # remote. Update state for locally cached blocks.
         if not self.enable_caching or delay_cache_blocks:
-            return KVCacheBlocks(new_blocks)
+            return KVCacheBlocks(new_blocks), time.monotonic_ns(
+            ) - total, cache_ns, save_ns, allocate_new_ns
 
         # NOTE(woosuk): We want to commit (cache) up to num_computed_tokens +
         # num_new_tokens, but must exclude "non-committable" tokens (e.g.,
@@ -299,13 +315,16 @@ class KVCacheManager:
         # at `request.num_tokens`, ensuring only "finalized" tokens are cached.
         num_tokens_to_cache = min(num_computed_tokens + num_new_tokens,
                                   request.num_tokens)
+        cache_ns = time.monotonic_ns()
         self.coordinator.cache_blocks(
             request,
             self.req_to_block_hashes[request.request_id],
             num_tokens_to_cache,
         )
+        cache_ns = time.monotonic_ns() - cache_ns
 
-        return KVCacheBlocks(new_blocks)
+        return KVCacheBlocks(new_blocks), time.monotonic_ns(
+        ) - total, cache_ns, save_ns, allocate_new_ns
 
     def free(self, request: Request) -> None:
         """Free the blocks allocated for the request.
