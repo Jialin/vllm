@@ -3,6 +3,7 @@
 
 import copy
 import gc
+import json
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
@@ -1352,19 +1353,62 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+        total = time.monotonic_ns()
+        update_state_ns = 0
+        prepare_input_ns = 0
+        forward_ns = 0
+
+        update_state_ns = time.monotonic_ns()
         self._update_states(scheduler_output)
+        update_state_ns = time.monotonic_ns() - update_state_ns
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
+                logger.info("===LITE " + json.dumps({
+                    "MODEL:UPDATE_STATE": {
+                        "ns": update_state_ns
+                    },
+                    "MODEL:PREPARE_INPUT": {
+                        "ns": prepare_input_ns
+                    },
+                    "MODEL:FORWARD": {
+                        "ns": forward_ns
+                    },
+                    "MODEL:OTHERS": {
+                        "ns":
+                        time.monotonic_ns() - total - update_state_ns -
+                        prepare_input_ns - forward_ns
+                    },
+                }))
                 return EMPTY_MODEL_RUNNER_OUTPUT
 
+            logger.info("===LITE " + json.dumps({
+                "MODEL:UPDATE_STATE": {
+                    "ns": update_state_ns
+                },
+                "MODEL:PREPARE_INPUT": {
+                    "ns": prepare_input_ns
+                },
+                "MODEL:FORWARD": {
+                    "ns": forward_ns
+                },
+                "MODEL:OTHERS": {
+                    "ns":
+                    time.monotonic_ns() - total - update_state_ns -
+                    prepare_input_ns - forward_ns
+                },
+            }))
             return self.kv_connector_no_forward(scheduler_output)
 
         # Prepare the decoder inputs.
+
+        prepare_input_ns = time.monotonic_ns()
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
          spec_decode_common_attn_metadata) = (
              self._prepare_inputs(scheduler_output))
+        prepare_input_ns = time.monotonic_ns() - prepare_input_ns
+
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
                 and num_scheduled_tokens <= self.cudagraph_batch_sizes[-1]):
@@ -1448,6 +1492,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
+            forward_ns = time.monotonic_ns()
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1482,6 +1527,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 if finished_sending or finished_recving:
                     hidden_states.finished_sending = finished_sending
                     hidden_states.finished_recving = finished_recving
+                forward_ns = time.monotonic_ns() - forward_ns
+                logger.info("===LITE " + json.dumps({
+                    "MODEL:UPDATE_STATE": {
+                        "ns": update_state_ns
+                    },
+                    "MODEL:PREPARE_INPUT": {
+                        "ns": prepare_input_ns
+                    },
+                    "MODEL:FORWARD": {
+                        "ns": forward_ns
+                    },
+                    "MODEL:OTHERS": {
+                        "ns":
+                        time.monotonic_ns() - total - update_state_ns -
+                        prepare_input_ns - forward_ns
+                    },
+                }))
                 return hidden_states
             assert isinstance(hidden_states, IntermediateTensors)
             get_pp_group().send_tensor_dict(hidden_states.tensors,
@@ -1489,6 +1551,23 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             logits = None
         else:
             if self.input_batch.pooling_params:
+                forward_ns = time.monotonic_ns() - forward_ns
+                logger.info("===LITE " + json.dumps({
+                    "MODEL:UPDATE_STATE": {
+                        "ns": update_state_ns
+                    },
+                    "MODEL:PREPARE_INPUT": {
+                        "ns": prepare_input_ns
+                    },
+                    "MODEL:FORWARD": {
+                        "ns": forward_ns
+                    },
+                    "MODEL:OTHERS": {
+                        "ns":
+                        time.monotonic_ns() - total - update_state_ns -
+                        prepare_input_ns - forward_ns
+                    },
+                }))
                 return self._pool(hidden_states, num_scheduled_tokens,
                                   num_scheduled_tokens_np, finished_sending,
                                   finished_recving)
@@ -1587,6 +1666,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampled_token_ids,
                 self.input_batch.vocab_size,
             )
+        forward_ns = time.monotonic_ns() - forward_ns
+
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1633,6 +1714,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         self.eplb_step()
 
+        logger.info("===LITE " + json.dumps({
+            "MODEL:UPDATE_STATE": {
+                "ns": update_state_ns
+            },
+            "MODEL:PREPARE_INPUT": {
+                "ns": prepare_input_ns
+            },
+            "MODEL:FORWARD": {
+                "ns": forward_ns
+            },
+            "MODEL:OTHERS": {
+                "ns":
+                time.monotonic_ns() - total - update_state_ns -
+                prepare_input_ns - forward_ns
+            },
+        }))
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
             req_id_to_index=self.input_batch.req_id_to_index,
