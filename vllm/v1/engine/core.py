@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import queue
 import signal
@@ -272,18 +273,38 @@ class EngineCore:
         Returns tuple of outputs and a flag indicating whether the model
         was executed.
         """
+        total_ns = time.monotonic_ns()
 
+        schedule_ns = time.monotonic_ns()
         # Check for any requests remaining in the scheduler - unfinished,
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+
         scheduler_output = self.scheduler.schedule()
+        schedule_ns = time.monotonic_ns() - schedule_ns
+
+        model_ns = time.monotonic_ns()
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
+        model_ns = time.monotonic_ns() - model_ns
+
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
 
+        total_ns = time.monotonic_ns() - total_ns
+        logger.info("===LITE " + json.dumps({
+            "STEP:SCHEDULE": {
+                "ns": schedule_ns
+            },
+            "STEP:MODEL": {
+                "ns": model_ns
+            },
+            "STEP:OTHERS": {
+                "ns": total_ns - schedule_ns - model_ns
+            }
+        }))
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
