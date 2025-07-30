@@ -172,8 +172,13 @@ class BlockPool:
                     request, start_token_idx, end_token_idx, -1)
 
                 # Compute the hash of the current block.
-                block_hash = hash_block_tokens(hash_fn, prev_block_hash_value,
-                                               block_tokens, extra_keys)
+                block_hash = hash_block_tokens(
+                    hash_fn,
+                    parent_block_hash=prev_block_hash_value,
+                    curr_block_token_ids=block_tokens,
+                    request_id=request.request_id,
+                    start_position=start_token_idx,
+                    extra_keys=extra_keys)
                 block_hashes.append(block_hash)
 
             # Update and added the full block to the cache.

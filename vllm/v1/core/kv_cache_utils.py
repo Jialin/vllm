@@ -29,8 +29,10 @@ class BlockHash(NamedTuple):
     """
     # Hash value of the block in an integer.
     hash_value: int
-    # Token IDs in the block.
-    token_ids: tuple[int, ...]
+    # TODO(Jialin): Add comment
+    request_id: str
+    start_position: int
+    block_size: int
     # Extra keys for the block.
     extra_keys: Optional[Any] = None
 
@@ -528,6 +530,8 @@ def hash_block_tokens(
         hash_function: Callable,
         parent_block_hash: Optional[int],
         curr_block_token_ids: Sequence[int],
+        request_id: str,
+        start_position: int,
         extra_keys: Optional[tuple[Any, ...]] = None) -> BlockHash:
     """Computes a hash value corresponding to the contents of a block and
     the contents of the preceding block(s). The hash value is used for
@@ -548,11 +552,12 @@ def hash_block_tokens(
     if not parent_block_hash:
         parent_block_hash = NONE_HASH
 
-    curr_block_token_ids_tuple = tuple(curr_block_token_ids)
-    return BlockHash(
-        hash_function(
-            (parent_block_hash, curr_block_token_ids_tuple, extra_keys)),
-        curr_block_token_ids_tuple, extra_keys)
+    return BlockHash(hash_value=hash_function(
+        (parent_block_hash, *curr_block_token_ids, extra_keys)),
+                     request_id=request_id,
+                     start_position=start_position,
+                     block_size=len(curr_block_token_ids),
+                     extra_keys=extra_keys)
 
 
 def hash_request_tokens(hash_function: Any, block_size: int,
@@ -587,8 +592,13 @@ def hash_request_tokens(hash_function: Any, block_size: int,
             req_extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
                 request, start, end, curr_mm_idx)
 
-        block_hash = hash_block_tokens(hash_function, parent_block_hash_value,
-                                       block_token_ids, req_extra_keys)
+        block_hash = hash_block_tokens(
+            hash_function,
+            parent_block_hash=parent_block_hash_value,
+            curr_block_token_ids=block_token_ids,
+            request_id=request.request_id,
+            start_position=start,
+            extra_keys=req_extra_keys)
         ret.append(block_hash)
         parent_block_hash_value = block_hash.hash_value
     return ret
