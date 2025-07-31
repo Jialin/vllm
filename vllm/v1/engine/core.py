@@ -85,8 +85,8 @@ def my_gc_callback(phase, info):
     elif phase == "stop":
         elapsed_ns = time.monotonic_ns() - GC_START
         if elapsed_ns > 1000000:
-            print(f"===Long running GC {elapsed_ns / 1000000.0:.2f}ms\n"
-                  f"{TOP_OBJECT_TYPES}")
+            logger.info(f"===Long running GC {elapsed_ns / 1000000.0:.2f}ms\n"
+                        f"{TOP_OBJECT_TYPES}")
 
 
 class EngineCore:
