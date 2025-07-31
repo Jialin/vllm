@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import os
 import queue
 import signal
 import sys
 import threading
 import time
-from collections import deque
+from collections import Counter, deque
 from collections.abc import Generator
 from concurrent.futures import Future
 from contextlib import ExitStack, contextmanager
@@ -54,6 +55,38 @@ POLLING_TIMEOUT_S = 2.5
 HANDSHAKE_TIMEOUT_MINS = 5
 
 _R = TypeVar('_R')  # Return type for collective_rpc
+
+
+def detailed_type(v: Any) -> str:
+    if type(v) is list:
+        return f"list_{len(v)}"
+    if type(v) is dict:
+        return f"dict_{len(v)}"
+    if type(v) is tuple:
+        return f"tuple_{len(v)}"
+    return str(type(v))
+
+
+GC_START: int = time.monotonic_ns()
+TOP_OBJECT_TYPES: str
+
+
+def my_gc_callback(phase, info):
+    global GC_START
+    global TOP_OBJECT_TYPES
+    if phase == "start":
+        GC_START = time.monotonic_ns()
+        gc1 = gc.get_count()
+        if gc1[0] >= 700:
+            TOP_OBJECT_TYPES = '\n'.join(
+                f'{item[1]:>4}:{item[0]}' for item in Counter(
+                    detailed_type(o)
+                    for o in gc.get_objects(0)).most_common(20))
+    elif phase == "stop":
+        elapsed_ns = time.monotonic_ns() - GC_START
+        if elapsed_ns > 1000000:
+            print(f"===Long running GC {elapsed_ns / 1000000.0:.2f}ms\n"
+                  f"{TOP_OBJECT_TYPES}")
 
 
 class EngineCore:
@@ -659,6 +692,7 @@ class EngineCoreProc(EngineCore):
     def run_busy_loop(self):
         """Core busy loop of the EngineCore."""
 
+        gc.callbacks.append(my_gc_callback)
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
             # 1) Poll the input queue until there is work to do.
