@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import multiprocessing
 import os
 import pickle
@@ -579,8 +580,13 @@ class WorkerProc:
     def worker_busy_loop(self):
         """Main busy loop for Multiprocessing Workers"""
         while True:
-            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
+            overall_start_ns = time.monotonic_ns()
 
+            dequeue_start_ns = time.monotonic_ns()
+            method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
+            dequeue_end_ns = time.monotonic_ns()
+
+            model_start_ns = time.monotonic_ns()
             try:
                 if isinstance(method, str):
                     func = getattr(self.worker, method)
@@ -598,7 +604,32 @@ class WorkerProc:
                     self.worker_response_mq.enqueue(
                         (WorkerProc.ResponseStatus.FAILURE, str(e)))
                 continue
+            model_end_ns = time.monotonic_ns()
 
+            enqueue_start_ns = time.monotonic_ns()
             if output_rank is None or self.rank == output_rank:
                 self.worker_response_mq.enqueue(
                     (WorkerProc.ResponseStatus.SUCCESS, output))
+            enqueue_end_ns = time.monotonic_ns()
+
+            overall_end_ns = time.monotonic_ns()
+
+            dequeue_ns = dequeue_end_ns - dequeue_start_ns
+            model_ns = model_end_ns - model_start_ns
+            enqueue_ns = enqueue_end_ns - enqueue_start_ns
+            other_ns = (overall_end_ns - overall_start_ns - dequeue_ns -
+                        model_ns - enqueue_ns)
+            logger.info(f"===LITE{self.rank} " + json.dumps({
+                "dequeue": {
+                    "ns": dequeue_ns
+                },
+                "model": {
+                    "ns": model_ns
+                },
+                "enqueue": {
+                    "ns": enqueue_ns
+                },
+                "others": {
+                    "ns": other_ns
+                }
+            }))
