@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import gc
 import json
 import multiprocessing
 import os
@@ -38,6 +39,17 @@ from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
+
+GC_START_NS: int
+
+
+def my_gc_callback(phase, info):
+    global GC_START_NS
+    if phase == "start":
+        GC_START_NS = time.monotonic_ns()
+    elif phase == "stop":
+        elapsed_ns = time.monotonic_ns() - GC_START_NS
+        logger.info("===LITE " + json.dumps({"gc": {"ns": elapsed_ns}}))
 
 
 class MultiprocExecutor(Executor):
@@ -484,6 +496,7 @@ class WorkerProc:
 
     @staticmethod
     def worker_main(*args, **kwargs):
+        gc.callbacks.append(my_gc_callback)
         """ Worker initialization and execution loops.
         This runs a background process """
 
