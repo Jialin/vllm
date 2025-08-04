@@ -3,6 +3,7 @@
 
 import dataclasses
 import gc
+import json
 import time
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any, Optional, Union, cast
@@ -1475,7 +1476,11 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: Optional[IntermediateTensors] = None,
     ) -> Union[ModelRunnerOutput, IntermediateTensors]:
+        overall_start_ns = time.monotonic_ns()
+
+        update_state_start_ns = time.monotonic_ns()
         self._update_states(scheduler_output)
+        update_state_end_ns = time.monotonic_ns()
         if not scheduler_output.total_num_scheduled_tokens:
             if not has_kv_transfer_group():
                 # Return empty ModelRunnerOutput if there's no work to do.
@@ -1484,11 +1489,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return self.kv_connector_no_forward(scheduler_output,
                                                 self.vllm_config)
 
+        prepare_input_start_ns = time.monotonic_ns()
         # Prepare the decoder inputs.
         (attn_metadata, attention_cuda_graphs, logits_indices,
          spec_decode_metadata, num_scheduled_tokens_np,
          spec_decode_common_attn_metadata) = (
              self._prepare_inputs(scheduler_output))
+        prepare_input_end_ns = time.monotonic_ns()
 
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         if (self.use_cuda_graph
@@ -1521,6 +1528,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         else:
             mm_embeds = []
 
+        embedding_start_ns = time.monotonic_ns()
         if self.is_multimodal_model and get_pp_group().is_first_rank:
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
@@ -1546,6 +1554,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             input_ids = self.input_ids[:num_input_tokens]
             inputs_embeds = None
             model_kwargs = {}
+        embedding_end_ns = time.monotonic_ns()
+
         if self.uses_mrope:
             positions = self.mrope_positions[:, :num_input_tokens]
         else:
@@ -1573,6 +1583,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         ):
             self.maybe_setup_kv_connector(scheduler_output)
 
+            forward_start_ns = time.monotonic_ns()
             model_output = self.model(
                 input_ids=input_ids,
                 positions=positions,
@@ -1712,6 +1723,8 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 sampled_token_ids,
                 self.input_batch.vocab_size,
             )
+        forward_end_ns = time.monotonic_ns()
+
         # Mask out the sampled tokens that should not be sampled.
         for i in discard_sampled_tokens_req_indices:
             valid_sampled_token_ids[i].clear()
@@ -1740,6 +1753,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             req_state = self.requests[req_id]
             req_state.output_token_ids.extend(sampled_ids)
 
+        draft_start_ns = time.monotonic_ns()
         if not self.speculative_config:
             # Speculative decoding is not enabled.
             spec_token_ids = None
@@ -1755,8 +1769,42 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 spec_decode_metadata,
                 spec_decode_common_attn_metadata,
             )
+        draft_end_ns = time.monotonic_ns()
 
         self.eplb_step()
+
+        overall_end_ns = time.monotonic_ns()
+
+        update_state_ns = update_state_end_ns - update_state_start_ns
+        prepare_input_ns = prepare_input_end_ns - prepare_input_start_ns
+        embedding_ns = embedding_end_ns - embedding_start_ns
+        forward_ns = forward_end_ns - forward_start_ns
+        draft_ns = draft_end_ns - draft_start_ns
+        other_ns = (overall_end_ns - overall_start_ns - update_state_ns -
+                    prepare_input_ns - embedding_ns - forward_ns - draft_ns)
+
+        rank = torch.distributed.get_rank()
+        if rank == 0:
+            logger.info(f"===LITE{rank} " + json.dumps({
+                "model:update_state": {
+                    "ns": update_state_ns
+                },
+                "model:prepare_input": {
+                    "ns": prepare_input_ns
+                },
+                "model:embedding": {
+                    "ns": embedding_ns
+                },
+                "model:forward": {
+                    "ns": forward_ns
+                },
+                "model:draft": {
+                    "ns": draft_ns
+                },
+                "model:others": {
+                    "ns": other_ns
+                }
+            }))
 
         return ModelRunnerOutput(
             req_ids=self.input_batch.req_ids,
