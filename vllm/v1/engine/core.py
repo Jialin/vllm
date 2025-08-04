@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import json
 import os
 import queue
 import signal
@@ -269,13 +270,32 @@ class EngineCore:
         # or finished and not yet removed from the batch.
         if not self.scheduler.has_requests():
             return {}, False
+        scheduler_ns = time.monotonic_ns()
         scheduler_output = self.scheduler.schedule()
+        scheduler_ns = time.monotonic_ns() - scheduler_ns
+
+        execute_model_ns = time.monotonic_ns()
         model_output = self.execute_model_with_error_logging(
             self.model_executor.execute_model,  # type: ignore
             scheduler_output)
+        execute_model_ns = time.monotonic_ns() - execute_model_ns
+
+        output_ns = time.monotonic_ns()
         engine_core_outputs = self.scheduler.update_from_output(
             scheduler_output, model_output)  # type: ignore
+        output_ns = time.monotonic_ns() - output_ns
 
+        logger.info("===LITE " + json.dumps({
+            "top:scheduler": {
+                "ns": scheduler_ns
+            },
+            "top:execute_model": {
+                "ns": execute_model_ns
+            },
+            "top:output": {
+                "ns": output_ns
+            },
+        }))
         return (engine_core_outputs,
                 scheduler_output.total_num_scheduled_tokens > 0)
 
@@ -697,10 +717,24 @@ class EngineCoreProc(EngineCore):
 
         # Loop until process is sent a SIGINT or SIGTERM
         while True:
+            total_ns = time.monotonic_ns()
             # 1) Poll the input queue until there is work to do.
+            input_ns = time.monotonic_ns()
             self._process_input_queue()
+            input_ns = time.monotonic_ns() - input_ns
+
             # 2) Step the engine core and return the outputs.
             self._process_engine_step()
+
+            total_ns = time.monotonic_ns() - total_ns
+            logger.info("===LITE " + json.dumps({
+                "top:input": {
+                    "ns": input_ns
+                },
+                "top:total": {
+                    "ns": total_ns
+                },
+            }))
 
     def _process_input_queue(self):
         """Exits when an engine step needs to be performed."""
