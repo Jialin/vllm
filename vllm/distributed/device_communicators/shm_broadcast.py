@@ -22,6 +22,7 @@ from vllm.distributed.utils import StatelessProcessGroup, sched_yield
 from vllm.logger import init_logger
 from vllm.utils import (get_ip, get_open_port, get_open_zmq_ipc_path,
                         is_valid_ipv6_address)
+from vllm.v1.core.sched.output import SchedulerOutput
 
 VLLM_RINGBUFFER_WARNING_INTERVAL = envs.VLLM_RINGBUFFER_WARNING_INTERVAL
 
@@ -506,14 +507,22 @@ class MessageQueue:
         if self._is_local_reader:
             with self.acquire_read(timeout, cancel) as buf:
                 overflow = buf[0] == 1
+                pull_time_ns = time.monotonic_ns()
                 if not overflow:
                     # no need to know the size of serialized object
                     # pickle format contains the size information internally
                     # see https://docs.python.org/3/library/pickle.html
                     obj = pickle.loads(buf[1:])
+                    if type(obj[1]) is tuple and len(obj[1]) > 0 and type(
+                            obj[1][0]) is SchedulerOutput:
+                        elapsed_ms = (pull_time_ns -
+                                      obj[1][0].client_sent_to_mq_ns) / 1.0e6
+                        logger.info(f"===Jialin pull delay {elapsed_ms:.6f}ms")
             if overflow:
+                logger.info("===Jialin overflow UNKNOWN PATH")
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
+            logger.info("===Jialin overflow UNKNOWN PATH")
             obj = MessageQueue.recv(self.remote_socket, timeout)
         else:
             raise RuntimeError("Only readers can dequeue")

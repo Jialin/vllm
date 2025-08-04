@@ -32,6 +32,7 @@ from vllm.logger import init_logger
 from vllm.utils import (decorate_logs, get_distributed_init_method,
                         get_loopback_ip, get_mp_context, get_open_port,
                         set_process_title)
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.executor.abstract import Executor, FailureCallback
 from vllm.v1.outputs import ModelRunnerOutput
 from vllm.worker.worker_base import WorkerWrapperBase
@@ -165,6 +166,8 @@ class MultiprocExecutor(Executor):
         scheduler_output,
     ) -> Union[ModelRunnerOutput, Future[ModelRunnerOutput]]:
         non_block = self.max_concurrent_batches > 1
+
+        scheduler_output.client_sent_to_mq_ns = time.monotonic_ns()
 
         if not self.has_connector:
             # get output only from a single worker (output_rank)
@@ -580,6 +583,12 @@ class WorkerProc:
         """Main busy loop for Multiprocessing Workers"""
         while True:
             method, args, kwargs, output_rank = self.rpc_broadcast_mq.dequeue()
+            if type(args) is tuple and len(args) > 0:
+                output = args[0]
+                if type(output) is SchedulerOutput:
+                    elapsed_ms = (time.monotonic_ns() -
+                                  output.client_sent_to_mq_ns) / 1.0e6
+                    logger.info("===Jialin PULL+PICKLE delay "f"{elapsed_ms:.6f}ms")
 
             try:
                 if isinstance(method, str):

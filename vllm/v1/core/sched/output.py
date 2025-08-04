@@ -153,5 +153,8 @@ class SchedulerOutput:
     # the bitmask for the whole batch
     grammar_bitmask: Optional[npt.NDArray[np.int32]]
 
+    # TODO(Jialin)
+    client_sent_to_mq_ns: int = 0
+
     # KV Cache Connector metadata.
     kv_connector_metadata: Optional[KVConnectorMetadata] = None
