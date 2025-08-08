@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import itertools
+import json
 import time
 from collections import defaultdict
 from collections.abc import Iterable
@@ -163,6 +164,8 @@ class Scheduler(SchedulerInterface):
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
 
     def schedule(self) -> SchedulerOutput:
+        total_ns = time.monotonic_ns()
+
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -201,6 +204,8 @@ class Scheduler(SchedulerInterface):
 
         # First, schedule the RUNNING requests.
         req_index = 0
+
+        grammar_wait_ns = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
 
@@ -353,7 +358,11 @@ class Scheduler(SchedulerInterface):
                 # for FSM compilation.
                 if request.status == RequestStatus.WAITING_FOR_FSM:
                     structured_output_req = request.structured_output_request
-                    if structured_output_req and structured_output_req.grammar:
+                    ns = time.monotonic_ns()
+                    is_waiting = structured_output_req and structured_output_req.grammar
+                    grammar_wait_ns += time.monotonic_ns() - ns
+
+                    if is_waiting:
                         request.status = RequestStatus.WAITING
                     else:
                         self.waiting.pop_request()
@@ -531,11 +540,14 @@ class Scheduler(SchedulerInterface):
                 self.kv_cache_manager.get_num_common_prefix_blocks(
                     any_request, len(self.running)))
 
+        bitmask_ns = time.monotonic_ns()
         grammar_bitmask = self.structured_output_manager.grammar_bitmask(
             self.requests,
             structured_output_request_ids,
             scheduled_spec_decode_tokens,
         )
+        bitmask_ns = time.monotonic_ns() - bitmask_ns
+
         # Construct the scheduler output.
         new_reqs_data = [
             NewRequestData.from_request(req,
@@ -581,6 +593,21 @@ class Scheduler(SchedulerInterface):
             self.kv_event_publisher.publish(batch)
 
         self._update_after_schedule(scheduler_output)
+
+        total_ns = time.monotonic_ns() - total_ns
+
+        logger.info("===LITE " + json.dumps({
+            "scheduler:grammar_wait": {
+                "ns": grammar_wait_ns
+            },
+            "scheduler:bitmask": {
+                "ns": bitmask_ns,
+            },
+            "scheduler:other": {
+                "ns": total_ns - grammar_wait_ns - bitmask_ns,
+            }
+        }))
+
         return scheduler_output
 
     def _update_after_schedule(
@@ -750,6 +777,8 @@ class Scheduler(SchedulerInterface):
         scheduler_output: SchedulerOutput,
         model_runner_output: ModelRunnerOutput,
     ) -> dict[int, EngineCoreOutputs]:
+        total_ns = time.monotonic_ns()
+
         sampled_token_ids = model_runner_output.sampled_token_ids
         spec_token_ids = model_runner_output.spec_token_ids
         logprobs = model_runner_output.logprobs
@@ -766,6 +795,9 @@ class Scheduler(SchedulerInterface):
         # to avoid expensive operations inside the loop.
         stopped_running_reqs: set[Request] = set()
         stopped_preempted_reqs: set[Request] = set()
+
+        wait_ns = 0
+        accept_ns = 0
         for req_id, num_tokens_scheduled in num_scheduled_tokens.items():
             assert num_tokens_scheduled > 0
             request = self.requests.get(req_id)
@@ -830,11 +862,17 @@ class Scheduler(SchedulerInterface):
 
             if new_token_ids and self.structured_output_manager.should_advance(
                     request):
+                ns = time.monotonic_ns()
+                grammar = request.structured_output_request.grammar
+                wait_ns += time.monotonic_ns() - ns
+
                 # NOTE: structured_output_request
                 # should not be None if use_structured_output, we have
                 # check above, so safe to ignore type warning
-                request.structured_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                ns = time.monotonic_ns()
+                grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids)
+                accept_ns += time.monotonic_ns() - ns
 
             # spec_token_ids comes from the model runner output
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
@@ -913,6 +951,18 @@ class Scheduler(SchedulerInterface):
             next(iter(engine_core_outputs.values())).scheduler_stats = (
                 self.make_stats(spec_decoding_stats))
 
+        total_ns = time.monotonic_ns() - total_ns
+        logger.info("===LITE " + json.dumps({
+            "output:wait": {
+                "ns": wait_ns
+            },
+            "output:accept": {
+                "ns": accept_ns
+            },
+            "output:other": {
+                "ns": total_ns - wait_ns - accept_ns
+            },
+        }))
         return engine_core_outputs
 
     def _update_request_with_output(

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import json
 import pickle
 import time
 from contextlib import contextmanager
@@ -486,7 +487,10 @@ class MessageQueue:
     def enqueue(self, obj, timeout: Optional[float] = None):
         """ Write to message queue with optional timeout (in seconds) """
         assert self._is_writer, "Only writers can enqueue"
+        dump_ns = time.monotonic_ns()
         serialized_obj = pickle.dumps(obj, protocol=pickle.HIGHEST_PROTOCOL)
+        dump_ns = time.monotonic_ns() - dump_ns
+        logger.info("===LITE " + json.dumps({"message:dump": {"ns": dump_ns}}))
         if self.n_local_reader > 0:
             if len(serialized_obj) >= self.buffer.max_chunk_bytes:
                 with self.acquire_write(timeout) as buf:
@@ -510,7 +514,13 @@ class MessageQueue:
                     # no need to know the size of serialized object
                     # pickle format contains the size information internally
                     # see https://docs.python.org/3/library/pickle.html
+                    load_ns = time.monotonic_ns()
                     obj = pickle.loads(buf[1:])
+                    load_ns = time.monotonic_ns() - load_ns
+                    logger.info("===LITE " +
+                                json.dumps({"message:load": {
+                                    "ns": load_ns
+                                }}))
             if overflow:
                 obj = MessageQueue.recv(self.local_socket, timeout)
         elif self._is_remote_reader:
