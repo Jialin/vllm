@@ -6,62 +6,83 @@ import numpy as np
 from tabulate import tabulate
 
 from benchmark_utils import TimeCollector
-from vllm.config import ModelConfig, SpeculativeConfig, VllmConfig
 from vllm.utils import FlexibleArgumentParser
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.ngram_proposer import NgramProposerStatus
 
 
 def main(args):
+    max_model_len = (
+        args.num_input_token + max(args.num_output_tokens) + args.num_spec_token
+    )
+    # model_config = ModelConfig(
+    #     model="openai/gpt-oss-120b",
+    #     task="generate",
+    #     max_model_len=max_model_len,
+    #     tokenizer="openai/gpt-oss-120b",
+    #     tokenizer_mode="auto",
+    #     dtype="auto",
+    #     seed=None,
+    #     trust_remote_code=False,
+    # )
+
     rows = []
-    for max_ngram in args.max_ngram:
-        collector = TimeCollector(TimeCollector.US)
-
-        model_config = ModelConfig(
-            model="facebook/opt-125m",
-            task="generate",
-            max_model_len=args.num_token + args.num_spec_token,
-            tokenizer="facebook/opt-125m",
-            tokenizer_mode="auto",
-            dtype="auto",
-            seed=None,
-            trust_remote_code=False,
-        )
-        proposer = NgramProposer(
-            vllm_config=VllmConfig(
-                model_config=model_config,
-                speculative_config=SpeculativeConfig(
-                    prompt_lookup_min=args.min_ngram,
-                    prompt_lookup_max=max_ngram,
-                    num_speculative_tokens=args.num_spec_token,
-                    method="ngram",
-                ),
+    for num_output_token in args.num_output_tokens:
+        for max_ngram in args.max_ngram:
+            # proposer = NgramProposer(
+            #     vllm_config=VllmConfig(
+            #         model_config=model_config,
+            #         speculative_config=SpeculativeConfig(
+            #             prompt_lookup_min=args.min_ngram,
+            #             prompt_lookup_max=max_ngram,
+            #             num_speculative_tokens=args.num_spec_token,
+            #             method="ngram",
+            #         ),
+            #     )
+            # )
+            # Warm up
+            status = NgramProposerStatus(
+                args.min_ngram, max_ngram, max_model_len, args.num_spec_token
             )
-        )
+            status.dirty = True
+            status.find_longest_matched_ngram_and_propose_tokens(
+                np.random.randint(0, 20, (args.num_input_token + num_output_token,))
+            )
 
-        # Warm up
-        proposer.propose(np.random.randint(0, 20, (args.num_token,)))
-
-        gc.collect()
-        for _ in range(args.num_iteration):
-            tokens = np.random.randint(0, 20, (args.num_req, args.num_token))
-            with collector:
-                for i in range(args.num_req):
-                    proposer.propose(tokens[i, :])
-        rows.append(
-            [args.num_req, args.num_token, args.min_ngram, max_ngram]
-            + collector.dump_avg_max()
-        )
+            input_collector = TimeCollector(TimeCollector.US)
+            output_collector = TimeCollector(TimeCollector.US)
+            gc.collect()
+            for _ in range(args.num_iteration):
+                tokens = np.random.randint(
+                    0, 20, (args.num_input_token + num_output_token,)
+                )
+                with input_collector:
+                    status.find_longest_matched_ngram_and_propose_tokens(
+                        tokens[: args.num_input_token]
+                    )
+                with output_collector:
+                    for i in range(num_output_token):
+                        status.find_longest_matched_ngram_and_propose_tokens(
+                            tokens[: args.num_input_token + i]
+                        )
+                    status.dirty = True
+            rows.append(
+                [args.num_input_token, num_output_token, args.min_ngram, max_ngram]
+                + input_collector.dump_avg_max()
+                + output_collector.dump_avg_max()
+            )
 
     print(
         tabulate(
             rows,
             headers=[
-                "# Request",
-                "# Token",
+                "Input Token",
+                "Output Token",
                 "Min Ngram",
                 "Max Ngram",
-                "Avg (us)",
-                "Max (us)",
+                "Input\nAvg (us)",
+                "Input\nMax (us)",
+                "Output\nAvg (us)",
+                "Output\nMax (us)",
             ],
             tablefmt="grid",
             floatfmt=".3f",
@@ -80,22 +101,29 @@ def invoke_main() -> None:
         help="Number of iterations to run to stablize final data readings",
     )
     parser.add_argument(
-        "--num-req", type=int, default=128, help="Number of requests in the batch"
+        "--num-input-token",
+        type=int,
+        default=1500,
+        help="Number of tokens for each request",
     )
     parser.add_argument(
-        "--num-token", type=int, default=1500, help="Number of tokens for each request"
+        "--num-output-tokens",
+        type=int,
+        nargs="*",
+        default=[1, 150, 1500, 8000],
+        help="Number of tokens for each request",
     )
     parser.add_argument(
         "--min-ngram",
         type=int,
-        default=3,
+        default=5,
         help="Minimum n-gram to match",
     )
     parser.add_argument(
         "--max-ngram",
         type=int,
         nargs="*",
-        default=[5, 7, 10, 15, 20],
+        default=[7, 10],
         help="Maximum n-gram to match",
     )
     parser.add_argument(
