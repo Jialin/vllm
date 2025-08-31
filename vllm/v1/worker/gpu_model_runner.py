@@ -1877,7 +1877,7 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self,
         sampled_token_ids: list[list[int]],
     ) -> list[list[int]]:
-        # TODO(woosuk): Optimize.
+        assert isinstance(self.drafter, NgramProposer)
         req_ids = self.input_batch.req_ids
         draft_token_ids: list[list[int]] = []
         for i, sampled_ids in enumerate(sampled_token_ids):
@@ -1899,9 +1899,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Skip requests that have already reached the max model length.
                 draft_token_ids.append([])
                 continue
-
+            if self.input_batch.ngram_proposer_states[i] is None:
+                self.input_batch.ngram_proposer_states[
+                    i] = self.drafter.create_state()
+            state = self.input_batch.ngram_proposer_states[i]
+            assert state is not None
             drafter_output = self.drafter.propose(
-                self.input_batch.token_ids_cpu[i, :num_tokens])
+                state, self.input_batch.token_ids_cpu[i, :num_tokens])
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:
