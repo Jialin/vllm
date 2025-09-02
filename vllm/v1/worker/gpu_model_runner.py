@@ -1622,6 +1622,9 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         if scheduler_output.grammar_bitmask is not None:
             self.apply_grammar_bitmask(scheduler_output, logits)
 
+        if self.speculative_config:
+            self.init_draft_proposer(scheduler_output)
+
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
         if spec_decode_metadata is None:
@@ -1767,6 +1770,35 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
         self._draft_token_ids = None
         return DraftTokenIds(req_ids, draft_token_ids)
 
+    def init_draft_proposer(self, scheduler_output: "SchedulerOutput") -> None:
+        if self.speculative_config.method == "ngram":
+            assert isinstance(self.drafter, NgramProposer)
+            if self.input_batch.ngram_proposer_states_v2 is None:
+                self.input_batch.ngram_proposer_states_v2 = self.drafter.create_states(
+                    self.input_batch.max_num_reqs)
+            assert self.input_batch.ngram_proposer_states_v2 is not None
+            for new_request_data in scheduler_output.scheduled_new_reqs:
+                req_idx = self.input_batch.req_id_to_index[
+                    new_request_data.req_id]
+                ns = time.monotonic_ns()
+                self.input_batch.ngram_proposer_states_v2.init(
+                    req_idx, self.input_batch.token_ids_cpu[
+                        req_idx, :self.input_batch.num_prompt_tokens[req_idx]])
+                ns = time.monotonic_ns() - ns
+                print(
+                    f"===Jialin ngram_proposer_states_v2.init {ns/1.0E3:.3f}us"
+                )
+                if self.input_batch.ngram_proposer_states[req_idx] is None:
+                    self.input_batch.ngram_proposer_states[
+                        req_idx] = self.drafter.create_state()
+                state = self.input_batch.ngram_proposer_states[req_idx]
+                assert state is not None
+                self.drafter.propose(
+                    state,
+                    self.input_batch.token_ids_cpu[
+                        req_idx, :self.input_batch.num_prompt_tokens[req_idx]],
+                    reset=True)
+
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -1899,13 +1931,12 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 # Skip requests that have already reached the max model length.
                 draft_token_ids.append([])
                 continue
-            if self.input_batch.ngram_proposer_states[i] is None:
-                self.input_batch.ngram_proposer_states[
-                    i] = self.drafter.create_state()
             state = self.input_batch.ngram_proposer_states[i]
             assert state is not None
             drafter_output = self.drafter.propose(
-                state, self.input_batch.token_ids_cpu[i, :num_tokens])
+                state,
+                self.input_batch.token_ids_cpu[i, :num_tokens],
+                reset=False)
             if drafter_output is None or len(drafter_output) == 0:
                 draft_token_ids.append([])
             else:

@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import gc
 
-import numpy as np
+import torch
 from tabulate import tabulate
 
 from benchmark_utils import TimeCollector
@@ -40,28 +40,77 @@ def main(args):
                     ),
                 )
             )
-            state = proposer.create_state()
-            # state.find_longest_matched_ngram_and_propose_tokens()
-            # state.mark_as_dirty()
+            req_cnt = 96
+            states = [None for _ in range(req_cnt)]
+            # states = [proposer.create_state() for _ in range(req_cnt)]
 
             input_collector = TimeCollector(TimeCollector.US)
             output_collector = TimeCollector(TimeCollector.US)
             gc.collect()
             for _ in range(args.num_iteration):
-                tokens = np.random.randint(
-                    0, 20, (args.num_input_token + num_output_token,), dtype=np.int32
+                tokens_tensor = torch.randint(
+                    0,
+                    20,
+                    (96, (args.num_input_token + num_output_token) * 2),
+                    dtype=torch.int32,
+                    device="cpu",
                 )
+                tokens = tokens_tensor.numpy()
+                # tokens = np.random.randint(
+                #     0, 20, (96, (args.num_input_token + num_output_token)*2), dtype=np.int32
+                # )
                 with input_collector:
-                    proposer.propose(state, tokens[: args.num_input_token])
+                    for req_idx in range(req_cnt):
+                        if states[req_idx] is None:
+                            states[req_idx] = proposer.create_state()
+                        state = states[req_idx]
+                        assert state is not None
+                        v = proposer.propose(
+                            state, tokens[req_idx, : args.num_input_token]
+                        )
+                        if v is not None:
+                            v.tolist()
+
                 with output_collector:
                     for i in range(num_output_token):
-                        proposer.propose(state, tokens[: args.num_input_token + i])
-                    state.mark_as_dirty()
+                        for req_idx in range(req_cnt):
+                            state = states[req_idx]
+                            assert state is not None
+                            v = proposer.propose(
+                                state, tokens[req_idx, : args.num_input_token + i]
+                            )
+                            if v is not None:
+                                v.tolist()
+                    for req_idx in range(req_cnt):
+                        state = states[req_idx]
+                        assert state is not None
+                        state.mark_as_dirty()
             rows.append(
                 [args.num_input_token, num_output_token, args.min_ngram, max_ngram]
                 + input_collector.dump_avg_max()
                 + output_collector.dump_avg_max()
             )
+
+            # state = proposer.create_state()
+
+            # input_collector = TimeCollector(TimeCollector.US)
+            # output_collector = TimeCollector(TimeCollector.US)
+            # gc.collect()
+            # for _ in range(args.num_iteration):
+            #     tokens = np.random.randint(
+            #         0, 20, (args.num_input_token + num_output_token,), dtype=np.int32
+            #     )
+            #     with input_collector:
+            #         proposer.propose(state, tokens[: args.num_input_token])
+            #     with output_collector:
+            #         for i in range(num_output_token):
+            #             proposer.propose(state, tokens[: args.num_input_token + i])
+            #         state.mark_as_dirty()
+            # rows.append(
+            #     [args.num_input_token, num_output_token, args.min_ngram, max_ngram]
+            #     + input_collector.dump_avg_max()
+            #     + output_collector.dump_avg_max()
+            # )
 
     print(
         tabulate(
@@ -89,7 +138,7 @@ def invoke_main() -> None:
     parser.add_argument(
         "--num-iteration",
         type=int,
-        default=100,
+        default=1,
         help="Number of iterations to run to stablize final data readings",
     )
     parser.add_argument(
@@ -102,7 +151,7 @@ def invoke_main() -> None:
         "--num-output-tokens",
         type=int,
         nargs="*",
-        default=[1, 150, 1500, 8000],
+        default=[1500],
         help="Number of tokens for each request",
     )
     parser.add_argument(
