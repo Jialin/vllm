@@ -169,7 +169,7 @@ class NgramProposerStates:
         ],
                         dtype=np.int32)
 
-    def _propose(self, req_idx: int, tokens: np.ndarray,
+    def _propose(self, req_idx: nb.int32, tokens: np.ndarray,
                  reset: nb.bool_) -> nb.int32:
         hashes_per_ngram = self.hashes_per_request[req_idx]
         if reset:
@@ -261,7 +261,8 @@ class NgramProposer:
                                warmup_num_tokens,
                                dtype=np.int32)
         states = self.create_states(warmup_num_req)
-        states.init(tokens, total_tokens, np.arange(warmup_num_req))
+        states.init(tokens, total_tokens,
+                    np.arange(warmup_num_req, dtype=np.int32))
         states.bulk_propose(tokens, total_tokens)
 
     def create_states(self, max_num_reqs: int) -> NgramProposerStates:
