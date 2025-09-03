@@ -76,7 +76,9 @@ from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.eagle import EagleProposer
 from vllm.v1.spec_decode.medusa import MedusaProposer
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposer
+from vllm.v1.spec_decode.ngram_proposer import (
+    NgramProposer, NgramProposerStates, bulk_propose_ngram_proposer_states,
+    init_ngram_proposer_states)
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.kv_connector_model_runner_mixin import (
@@ -1776,17 +1778,22 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
                 return
             assert isinstance(self.drafter, NgramProposer)
             if self.input_batch.ngram_proposer_states is None:
-                self.input_batch.ngram_proposer_states = (
-                    self.drafter.create_states(self.input_batch.max_num_reqs))
+                self.input_batch.ngram_proposer_states = NgramProposerStates(
+                    max_num_reqs=self.input_batch.max_num_reqs,
+                    min_ngram=self.drafter.min_n,
+                    max_ngram=self.drafter.max_n,
+                    max_model_len=self.drafter.max_model_len,
+                    k=self.drafter.k)
             assert self.input_batch.ngram_proposer_states is not None
             req_indices = np.array([
                 self.input_batch.req_id_to_index[new_request_data.req_id]
                 for new_request_data in scheduler_output.scheduled_new_reqs
             ],
                                    dtype=np.int32)
-            self.input_batch.ngram_proposer_states.init(
-                self.input_batch.token_ids_cpu,
-                self.input_batch.num_prompt_tokens, req_indices)
+            init_ngram_proposer_states(self.input_batch.ngram_proposer_states,
+                                       self.input_batch.token_ids_cpu,
+                                       self.input_batch.num_prompt_tokens,
+                                       req_indices)
 
     def propose_draft_token_ids(
         self,
@@ -1925,16 +1932,13 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return results
 
         assert self.input_batch.ngram_proposer_states is not None
-        # ns = time.monotonic_ns()
-        req_indices_np = np.array(req_indices, dtype=np.int32)
-        draft_token_lists = self.input_batch.ngram_proposer_states.bulk_propose(
+        draft_token_lists = bulk_propose_ngram_proposer_states(
+            self.input_batch.ngram_proposer_states,
             self.input_batch.token_ids_cpu,
-            self.input_batch.num_tokens_no_spec, req_indices_np)
+            self.input_batch.num_tokens_no_spec, req_indices)
         for req_idx, draft_token_list in zip(req_indices, draft_token_lists):
             if len(draft_token_list) > 0:
                 results[req_idx] = draft_token_list.tolist()
-        # ns = time.monotonic_ns() - ns
-        # logger.info(f"===Jialin {ns/1.0E3:.2f}us batch={len(req_indices)}")
         return results
 
     def update_config(self, overrides: dict[str, Any]) -> None:

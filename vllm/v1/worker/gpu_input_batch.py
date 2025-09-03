@@ -21,7 +21,8 @@ from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors,
                                              MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
-from vllm.v1.spec_decode.ngram_proposer import NgramProposerStates
+from vllm.v1.spec_decode.ngram_proposer import (NgramProposerStates,
+                                                swap_ngram_proposer_states)
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -524,7 +525,7 @@ class InputBatch:
                     self.allowed_token_ids_mask_cpu_tensor[i1]
 
         if ngram_proposer_states := self.ngram_proposer_states:
-            ngram_proposer_states.swap_states(i1, i2)
+            swap_ngram_proposer_states(ngram_proposer_states, i1, i2)
 
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
