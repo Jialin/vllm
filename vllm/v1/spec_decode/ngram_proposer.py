@@ -163,15 +163,14 @@ class NgramProposerStates:
 
     def bulk_propose(self, tokens: np.ndarray, token_cnts: np.ndarray,
                      req_indices: np.ndarray) -> np.ndarray:
-        return np.array([
+        return [
             self._propose(
                 req_idx, tokens[req_idx, :token_cnts[req_idx]], reset=False)
             for req_idx in req_indices
-        ],
-                        dtype=np.int32)
+        ]
 
     def _propose(self, req_idx: nb.int32, tokens: np.ndarray,
-                 reset: nb.bool_) -> nb.int32:
+                 reset: nb.bool_) -> np.ndarray:
         hashes_per_ngram = self.hashes_per_request[req_idx]
         if reset:
             self.last_idx[req_idx] = -1
@@ -184,7 +183,7 @@ class NgramProposerStates:
 
         res_matched_idx: np.int32 = -1
         if k <= 0:
-            return res_matched_idx
+            return np.zeros((0,), dtype=np.int32)
 
         initial_hash: np.int64 = 0
         start_idx = token_cnt - 1 if self.last_matched_idx[
@@ -229,7 +228,9 @@ class NgramProposerStates:
 
         self.last_idx[req_idx] = token_cnt - 1
         self.last_matched_idx[req_idx] = res_matched_idx
-        return res_matched_idx
+        if res_matched_idx < 0:
+            return np.zeros((0,), dtype=np.int32)
+        return tokens[res_matched_idx:min(res_matched_idx + k, token_cnt)]
 
 
 class NgramProposer:

@@ -1925,19 +1925,16 @@ class GPUModelRunner(LoRAModelRunnerMixin, KVConnectorModelRunnerMixin):
             return results
 
         assert self.input_batch.ngram_proposer_states is not None
-        ns = time.monotonic_ns()
+        # ns = time.monotonic_ns()
         req_indices_np = np.array(req_indices, dtype=np.int32)
-        draft_token_lists = self.drafter.propose(
+        draft_token_lists = self.input_batch.ngram_proposer_states.bulk_propose(
             self.input_batch.token_ids_cpu,
-            self.input_batch.num_tokens_no_spec, req_indices_np,
-            self.input_batch.ngram_proposer_states.bulk_propose(
-                self.input_batch.token_ids_cpu,
-                self.input_batch.num_tokens_no_spec, req_indices_np))
-        ns = time.monotonic_ns() - ns
-        logger.info(f"===Jialin {ns/1.0E3:.2f}us batch={len(req_indices)}")
-        # for req_idx, draft_token_list in zip(req_indices, draft_token_lists):
-        #     if draft_token_list is not None:
-        #         results[req_idx] = draft_token_list.tolist()
+            self.input_batch.num_tokens_no_spec, req_indices_np)
+        for req_idx, draft_token_list in zip(req_indices, draft_token_lists):
+            if len(draft_token_list) > 0:
+                results[req_idx] = draft_token_list.tolist()
+        # ns = time.monotonic_ns() - ns
+        # logger.info(f"===Jialin {ns/1.0E3:.2f}us batch={len(req_indices)}")
         return results
 
     def update_config(self, overrides: dict[str, Any]) -> None:
