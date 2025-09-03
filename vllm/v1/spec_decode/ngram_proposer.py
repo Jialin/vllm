@@ -60,7 +60,9 @@ class NgramProposerState:
 
         res_matched_idx: np.int32 = -1
         initial_hash: np.int64 = 0
-        start_idx = total_token - 1 if self.last_matched_idx >= self.max_ngram - 1 else self.last_idx + 1
+        start_idx = (total_token -
+                     1 if self.last_matched_idx >= self.max_ngram -
+                     1 else self.last_idx + 1)
         for ngram in range(self.min_ngram, self.max_ngram + 1):
             if ngram == self.min_ngram:
                 for i in range(ngram - 1):
@@ -159,13 +161,12 @@ class NgramProposerStates:
                           tokens[req_idx, :token_cnts[req_idx]],
                           reset=True)
 
-    def bulk_propose(self, tokens: np.ndarray,
-                     token_cnts: np.ndarray) -> np.ndarray:
-        num_req = token_cnts.shape[0]
+    def bulk_propose(self, tokens: np.ndarray, token_cnts: np.ndarray,
+                     req_indices: np.ndarray) -> np.ndarray:
         return np.array([
             self._propose(
                 req_idx, tokens[req_idx, :token_cnts[req_idx]], reset=False)
-            for req_idx in range(num_req)
+            for req_idx in req_indices
         ],
                         dtype=np.int32)
 
@@ -260,10 +261,10 @@ class NgramProposer:
         total_tokens = np.full((warmup_num_req, ),
                                warmup_num_tokens,
                                dtype=np.int32)
+        req_indices = np.arange(warmup_num_req, dtype=np.int32)
         states = self.create_states(warmup_num_req)
-        states.init(tokens, total_tokens,
-                    np.arange(warmup_num_req, dtype=np.int32))
-        states.bulk_propose(tokens, total_tokens)
+        states.init(tokens, total_tokens, req_indices)
+        states.bulk_propose(tokens, total_tokens, req_indices)
 
     def create_states(self, max_num_reqs: int) -> NgramProposerStates:
         return NgramProposerStates(max_num_reqs=max_num_reqs,
@@ -274,9 +275,10 @@ class NgramProposer:
 
     def propose(
         self,
-        states: NgramProposerStates,
         tokens: np.ndarray,
         token_cnts: np.ndarray,
+        req_indices: np.ndarray,
+        spec_start_indices: np.ndarray,
     ) -> list[Optional[np.ndarray]]:
         """Proposes the next sequence of tokens based on n-gram pattern
         matching in the context. The function finds matches of the last n
@@ -302,14 +304,14 @@ class NgramProposer:
               followed that pattern. Here we will return [4,2,3] because
               we only have three tokens after the match.
         """
-        spec_start_indices = states.bulk_propose(tokens, token_cnts)
-        drafts: list[Optional[np.ndarray]] = [None] * token_cnts.shape[0]
-        for i, spec_start_idx in enumerate(spec_start_indices):
-            if spec_start_idx >= 0:
-                k = min(self.k, self.max_model_len - token_cnts[i],
-                        token_cnts[i] - spec_start_idx)
-                drafts[i] = tokens[i, spec_start_idx:spec_start_idx + k]
+        drafts: list[Optional[np.ndarray]] = [None] * req_indices.shape[0]
         return drafts
+        # for i, (req_idx, spec_start_idx) in enumerate(zip(req_indices, spec_start_indices)):
+        #     if spec_start_idx >= 0:
+        #         k = min(self.k, self.max_model_len - token_cnts[req_idx],
+        #                 token_cnts[req_idx] - spec_start_idx)
+        #         drafts[i] = tokens[req_idx, spec_start_idx:spec_start_idx + k]
+        # return drafts
 
     def load_model(self, *args, **kwargs):
         # No model to load.
