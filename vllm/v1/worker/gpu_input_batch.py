@@ -21,6 +21,8 @@ from vllm.v1.sample.logits_processor import (BatchUpdateBuilder,
                                              LogitsProcessors,
                                              MoveDirectionality)
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.spec_decode.ngram_proposer import (NgramProposerStates,
+                                                swap_ngram_proposer_states)
 from vllm.v1.spec_decode.utils import is_spec_decode_unsupported
 from vllm.v1.utils import copy_slice
 from vllm.v1.worker.block_table import MultiGroupBlockTable
@@ -250,6 +252,8 @@ class InputBatch:
 
         self.pooling_params: dict[str, PoolingParams] = {}
 
+        self.ngram_proposer_states: Optional[NgramProposerStates] = None
+
     @property
     def req_ids(self) -> list[str]:
         # None elements should only be present transiently
@@ -453,6 +457,7 @@ class InputBatch:
             # False means we don't fill with -inf.
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
+
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -518,6 +523,9 @@ class InputBatch:
                 self.allowed_token_ids_mask_cpu_tensor[i2] =\
                 self.allowed_token_ids_mask_cpu_tensor[i2], \
                     self.allowed_token_ids_mask_cpu_tensor[i1]
+
+        if ngram_proposer_states := self.ngram_proposer_states:
+            swap_ngram_proposer_states(ngram_proposer_states, i1, i2)
 
     def condense(self) -> None:
         """Slide non-empty requests down into lower, empty indices.
